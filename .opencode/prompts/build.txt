@@ -1,0 +1,10 @@
+Du arbeitest am Projekt video2wiki.
+
+Wichtige Regeln:
+- Nach jeder Code-Änderung führst du automatisch aus:
+  1. `uv run ruff check --fix .`  (Lint-Fehler beheben)
+  2. `uv run ruff format .`       (Code formatieren)
+  3. `uv run pytest`              (Tests ausführen)
+- Falls Tests fehlschlagen, behebst du die Fehler und wiederholst den Zyklus.
+- Verwende immer `uv` (kein pip/poetry).
+- Sprache der Ausgabe ist Deutsch.
