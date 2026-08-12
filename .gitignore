@@ -10,4 +10,5 @@ venv/
 *.wav
 *.m4a
 .env
-.video2wiki_work/
+.video2wiki_work/*
+!.video2wiki_work/.gitkeep
