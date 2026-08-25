@@ -5,10 +5,13 @@ Bietet ein kleines Web-UI mit:
 - Live-Ansicht laufender Jobs (mit Log-Ausgabe)
 - Journal-Ansicht (bereits verarbeitete Videos)
 
-Die Verarbeitung läuft in einem Thread hinter der API (``JobManager``), da
-Download, Whisper-Transkription und LLM-Zusammenfassung lange dauern.
+Die Verarbeitung wird von einer kleinen Worker-Queue hinter der API
+(``JobManager``) übernommen: Alle eingereichten Videos laufen mit begrenzter
+Parallelität (Standard: 1 = sequentiell), damit Download, Whisper-Transkription
+und LLM-Zusammenfassung auf ressourcenarmen Rechnern nicht zu OOM führen.
 """
 
+import queue
 import threading
 import uuid
 from dataclasses import dataclass
@@ -56,6 +59,7 @@ class WebConfig:
     api_base: str | None = None
     model: str | None = None
     whisper_model: str = "small"
+    concurrency: int = 1
 
 
 class ProcessRequest(BaseModel):
@@ -75,12 +79,41 @@ def _now() -> str:
 
 
 class JobManager:
-    """Verwaltet Hintergrund-Verarbeitungsjobs in Memory."""
+    """Verwaltet Hintergrund-Verarbeitungsjobs in Memory.
 
-    def __init__(self, config: WebConfig) -> None:
+    Die Jobs werden in einer FIFO-Warteschlange (``queue.Queue``) gehalten und
+    von einer festen Anzahl Worker-Threads (``concurrency``) abgearbeitet.
+    Dadurch laufen Download, Whisper-Transkription und LLM-Zusammenfassung nie
+    unbegrenzt parallel – wichtig auf ressourcenarmen Rechnern, um OOM zu
+    vermeiden. Default ``concurrency=1`` → strikt sequentiell.
+    """
+
+    def __init__(self, config: WebConfig, concurrency: int = 1) -> None:
         self._config = config
+        self._concurrency = max(1, concurrency)
         self._jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._workers = [self._spawn_worker(i) for i in range(self._concurrency)]
+
+    def _spawn_worker(self, index: int) -> threading.Thread:
+        worker = threading.Thread(
+            target=self._worker_loop,
+            name=f"video2wiki-worker-{index}",
+            daemon=True,
+        )
+        worker.start()
+        return worker
+
+    def _worker_loop(self) -> None:
+        while True:
+            job_id = self._queue.get()
+            try:
+                self._run(job_id)
+            except Exception as e:  # noqa: BLE001 – nie soll ein Worker sterben
+                log.error("Worker-Fehler bei Job %s: %s", job_id, e)
+            finally:
+                self._queue.task_done()
 
     def submit(self, url: str, category: str | None, whisper_model: str) -> str:
         job_id = uuid.uuid4().hex[:12]
@@ -100,8 +133,9 @@ class JobManager:
         with self._lock:
             self._jobs[job_id] = job
 
-        thread = threading.Thread(target=self._run, args=(job_id,), name=f"video2wiki-job-{job_id}", daemon=True)
-        thread.start()
+        # In die Warteschlange einreihen, statt einen eigenen Thread zu starten –
+        # ein Worker nimmt den Job sofort oder später (falls schon einer läuft).
+        self._queue.put(job_id)
         return job_id
 
     def _run(self, job_id: str) -> None:
@@ -195,8 +229,14 @@ def create_app(
     api_base: str | None = None,
     model: str | None = None,
     whisper_model: str = "small",
+    concurrency: int = 1,
 ) -> FastAPI:
-    """Baut die FastAPI-App für den Webservice auf."""
+    """Baut die FastAPI-App für den Webservice auf.
+
+    Args:
+        concurrency: Anzahl gleichzeitig laufender Verarbeitungsjobs.
+            Default 1 (sequentiell) – verhindert OOM auf ressourcenarmen Rechnern.
+    """
     config = WebConfig(
         output=output,
         work_dir=work_dir,
@@ -204,8 +244,9 @@ def create_app(
         api_base=api_base,
         model=model,
         whisper_model=whisper_model,
+        concurrency=concurrency,
     )
-    manager = JobManager(config)
+    manager = JobManager(config, concurrency=concurrency)
 
     app = FastAPI(title="video2wiki", version="0.1.0", description="YouTube → Transkription → Zusammenfassung → Wiki")
     if _STATIC_DIR.exists():

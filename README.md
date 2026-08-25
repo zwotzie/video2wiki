@@ -53,6 +53,7 @@ Ein FastAPI-basierter Webservice mit Web-UI, der alle Video-Pipeline-Funktionen 
 
 **Features:**
 - **Video-Eingabe**: Formular zum Einreichen einer YouTube-URL (mit optionaler Kategorie und Whisper-Modell). Die Verarbeitung läuft im Hintergrund und zeigt den Fortschritt als Live-Log.
+- **Job-Queue**: Eingereichte Videos werden gequeued und mit begrenzter Parallelität verarbeitet (Standard: 1 = sequentiell), damit Download/Whisper/LLM auf ressourcenarmen Rechnern nicht zu OOM führen.
 - **Journal-Ansicht**: Übersicht aller bereits verarbeiteten Videos, inklusive „Wiki anzeigen“ (rendert den Markdown-Eintrag) und „Backfill“-Knopf.
 
 **Starten:**
@@ -71,6 +72,7 @@ uv run video2wiki web \
   -o ./wiki \           # Ausgabeverzeichnis (Standard: ./wiki)
   --work-dir ./.video2wiki_work \   # Arbeitsverzeichnis (Downloads/Transkriptionen)
   -m small \            # Whisper-Modell (Standard: small)
+  --concurrency 1 \     # Gleichzeitige Jobs (Standard: 1 = sequentiell)
   -t template.md \      # Benutzerdefiniertes Template
   --api-base … --llm …  # LLM-Konfiguration (überschreibt .env)
 ```

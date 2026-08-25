@@ -109,6 +109,11 @@ def web(
     whisper_model: str = typer.Option(
         "small", "--model", "-m", help="Whisper-Modellgröße (tiny, base, small, medium, large-v3)"
     ),
+    concurrency: int = typer.Option(
+        1,
+        "--concurrency",
+        help="Gleichzeitig laufende Verarbeitungsjobs (1 = sequentiell, vermeidet OOM)",
+    ),
 ):
     """Starte den Webservice mit Web-UI (Journal + Video-Eingabe)."""
 
@@ -126,8 +131,13 @@ def web(
         api_base=api_base,
         model=llm,
         whisper_model=whisper_model,
+        concurrency=concurrency,
     )
     log.info("Starte Webservice auf http://%s:%s (Wiki: %s)", host, port, output)
+    if concurrency > 1:
+        log.info("Parallelität: %s gleichzeitige Verarbeitungsjobs", concurrency)
+    else:
+        log.info("Parallelität: 1 (sequentiell) – eingereichte Videos werden gequeued")
     uvicorn.run(app_obj, host=host, port=port)
 
 

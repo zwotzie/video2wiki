@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -158,3 +159,112 @@ class TestWikiView:
     def test_path_traversal_blocked(self, client):
         r = client.get("/api/wiki/..%2F..%2F..%2Fetc%2Fpasswd")
         assert r.status_code == 404
+
+
+class TestJobQueue:
+    """Verifiziert, dass eingereichte Videos gequeued und mit begrenzter
+    Parallelität verarbeitet werden (OOM-Schutz auf schwachen Rechnern)."""
+
+    @staticmethod
+    def _mk_state():
+        return {
+            "lock": threading.Lock(),
+            "active": 0,
+            "max_active": 0,
+            "calls": 0,
+            "first_started": threading.Event(),
+            "second_started": threading.Event(),
+        }
+
+    def _blocking_process(self, state, release):
+        """process_video-Mock: zählt parallele Aufrufe und blockt bis release."""
+
+        def fake_process(source, options=None, resolve_category=None, emit_log=None):
+            with state["lock"]:
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    state["first_started"].set()
+                elif state["calls"] == 2:
+                    state["second_started"].set()
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            try:
+                assert release.wait(timeout=5), "release-Event wurde nicht gesetzt"
+            finally:
+                with state["lock"]:
+                    state["active"] -= 1
+            return PipelineResult(status="done", entry=None, path=None)
+
+        return fake_process
+
+    @staticmethod
+    def _wait_statuses(client, expected, timeout=5.0):
+        """Pollt /api/jobs, bis die sortierte Status-Liste `expected` erreicht ist."""
+
+        def snapshot():
+            jobs = client.get("/api/jobs").json()["jobs"]
+            return sorted(j["status"] for j in jobs)
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if snapshot() == expected:
+                return
+            time.sleep(0.05)
+        pytest.fail(f"Statuses erreichten nie {expected} (zuletzt: {snapshot()}).")
+
+    def test_serializes_jobs_at_concurrency_1(self, mocker, client):
+        """Default (concurrency=1): nie mehr als ein Job gleichzeitig aktiv."""
+        state = self._mk_state()
+        release = threading.Event()
+        mocker.patch("video2wiki.webserver.process_video", side_effect=self._blocking_process(state, release))
+
+        r1 = client.post("/api/process", json={"url": "https://youtube.com/watch?v=aaa"}).json()
+        r2 = client.post("/api/process", json={"url": "https://youtube.com/watch?v=bbb"}).json()
+
+        # Der erste Job läuft, der zweite wartet eindeutig in der Warteschlange
+        assert state["first_started"].wait(timeout=5), "Job 1 sollte starten"
+        self._wait_statuses(client, ["queued", "running"])
+
+        # Job 1 freigeben → läuft zu Ende, erst danach beginnt Job 2
+        release.set()
+        _wait_for_job(client, r1["job_id"])
+        assert state["second_started"].wait(timeout=5), "Job 2 sollte erst nach Job 1 starten"
+        _wait_for_job(client, r2["job_id"])
+
+        assert state["max_active"] == 1, "Es lief nie mehr als ein Job gleichzeitig."
+
+    def test_concurrency_gt_1_allows_parallelism(self, mocker, tmp_path):
+        """Mit concurrency=2 können zwei Jobs gleichzeitig laufen, der dritte wartet."""
+        app = create_app(output=tmp_path, concurrency=2)
+        state = self._mk_state()
+        release = threading.Event()
+        mocker.patch("video2wiki.webserver.process_video", side_effect=self._blocking_process(state, release))
+
+        with TestClient(app, raise_server_exceptions=True) as client:
+            ids = []
+            for u in ("aaa", "bbb", "ccc"):
+                ids.append(
+                    client.post("/api/process", json={"url": f"https://youtube.com/watch?v={u}"}).json()["job_id"]
+                )
+
+            # Beide Worker aktiv, der dritte wartet in der Warteschlange
+            self._wait_statuses(client, ["queued", "running", "running"])
+
+            release.set()
+            for job_id in ids:
+                _wait_for_job(client, job_id)
+
+            assert state["max_active"] == 2
+
+    def test_queued_before_running(self, mocker, client):
+        """Der Status eines eingereichten Jobs ist initial 'queued'."""
+        state = self._mk_state()
+        release = threading.Event()
+        mocker.patch("video2wiki.webserver.process_video", side_effect=self._blocking_process(state, release))
+
+        r = client.post("/api/process", json={"url": "https://youtube.com/watch?v=aaa"})
+        assert r.status_code == 202
+        assert r.json()["status"] == "queued"
+
+        release.set()
+        _wait_for_job(client, r.json()["job_id"])
