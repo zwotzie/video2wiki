@@ -11,10 +11,13 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.0",
 ]
 
 [project.scripts]
-video2wiki = "video2wiki.cli:app"
+video2wiki = "video2wiki.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>video2wiki – Webservice</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>🎬 video2wiki</h1>
+    <p class="subtitle">YouTube-Video → Transkription → Zusammenfassung → Wiki-Eintrag</p>
+  </header>
+
+  <main>
+    <!-- Video-Eingabe -->
+    <section class="card" id="submit-card">
+      <h2>Video verarbeiten</h2>
+      <form id="submit-form" autocomplete="off">
+        <label for="url">YouTube-URL *</label>
+        <input type="url" id="url" name="url" required placeholder="https://www.youtube.com/watch?v=…" />
+
+        <label for="category">Kategorie <span class="hint">(optional)</span></label>
+        <input type="text" id="category" name="category" list="category-list" placeholder="energie, finanzen, gesundheit, …" />
+        <datalist id="category-list">
+          {% for cat in categories %}<option value="{{ cat }}"></option>{% endfor %}
+        </datalist>
+
+        <label for="whisper_model">Whisper-Modell</label>
+        <select id="whisper_model" name="whisper_model">
+          {% for m in whisper_models %}
+          <option value="{{ m }}" {% if m == default_whisper_model %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+
+        <button type="submit" id="submit-btn">Video verarbeiten</button>
+      </form>
+      <p id="submit-status" class="status"></p>
+    </section>
+
+    <!-- Jobs -->
+    <section class="card">
+      <h2>Aktuelle Jobs</h2>
+      <div id="jobs">Keine Jobs vorhanden.</div>
+    </section>
+
+    <!-- Journal -->
+    <section class="card">
+      <h2>Journal <button id="backfill-btn" class="link-btn" type="button">Backfill</button></h2>
+      <div class="table-wrap">
+        <table id="journal-table">
+          <thead>
+            <tr>
+              <th>Titel</th>
+              <th>Kanal</th>
+              <th>Kategorie</th>
+              <th>Verarbeitet</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5">Journal wird geladen …</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Wiki-Markdown-Modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <strong id="modal-title"></strong>
+        <button class="link-btn" id="modal-close" type="button">×</button>
+      </div>
+      <pre id="modal-content"></pre>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
