@@ -5,6 +5,7 @@ import pytest
 
 from video2wiki.downloader import (
     _parse_subtitles,
+    _ytdlp_extra_args,
     download_audio,
     get_subtitles,
     get_video_id,
@@ -95,6 +96,24 @@ class TestGetVideoMetadata:
             get_video_metadata("https://youtube.com/watch?v=abc123DEFgh")
 
 
+class TestYtdlpExtraArgs:
+    """YouTube-403-Workaround: Android-Player-Client + node-Runtime."""
+
+    def test_defaults(self):
+        args = _ytdlp_extra_args()
+        assert "--js-runtimes" in args
+        assert "node" in args
+        assert "--extractor-args" in args
+        assert "youtube:player_client=android" in args
+
+    def test_configurable_via_env(self, monkeypatch):
+        monkeypatch.setenv("YTDLP_JS_RUNTIME", "deno")
+        monkeypatch.setenv("YTDLP_PLAYER_CLIENT", "tv")
+        args = _ytdlp_extra_args()
+        assert "deno" in args
+        assert "youtube:player_client=tv" in args
+
+
 class TestDownloadAudio:
     def test_download_success(self, mocker, tmp_path):
         vid = "abc123DEFgh"
@@ -113,6 +132,21 @@ class TestDownloadAudio:
         assert "-x" in cmd
         assert "--audio-format" in cmd
         assert "mp3" in cmd
+
+    def test_includes_yt_403_workaround_args(self, mocker, tmp_path):
+        """Die Extra-Argumente gegen YouTube-Blockaden müssen im yt-dlp-Aufruf stecken."""
+        vid = "abc123DEFgh"
+        expected_file = tmp_path / f"{vid}.mp3"
+        expected_file.write_text("fake audio")
+        mocker.patch("video2wiki.downloader.get_video_id", return_value=vid)
+        mock_run = mocker.patch("video2wiki.downloader.subprocess.run")
+
+        download_audio(f"https://youtube.com/watch?v={vid}", tmp_path)
+        cmd = mock_run.call_args[0][0]
+        assert "--js-runtimes" in cmd
+        assert "node" in cmd
+        assert "--extractor-args" in cmd
+        assert "youtube:player_client=android" in cmd
 
     def test_file_not_found(self, mocker, tmp_path):
         vid = "abc123DEFgh"

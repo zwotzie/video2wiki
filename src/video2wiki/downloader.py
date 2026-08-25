@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -9,6 +10,25 @@ log = get_logger("downloader")
 
 # Verzögerung zwischen yt-dlp-Aufrufen (Sekunden); in Tests auf 0 gesetzt
 RATE_LIMIT_DELAY = 1.5
+
+
+def _ytdlp_extra_args() -> list[str]:
+    """Zusätzliche yt-dlp-Argumente gegen YouTube-Blockaden (HTTP 403).
+
+    Seit Mitte 2026 liefert der Default-Player-Client von yt-dlp bei YouTube
+    Streaming-URLs, die von YouTube mit 403 blockiert werden. Der `android`-Client
+    zusammen mit einer erlaubten JavaScript-Runtime (z. B. node) umgeht das.
+    Über die Umgebungsvariablen YTDLP_JS_RUNTIME und YTDLP_PLAYER_CLIENT
+    konfigurierbar.
+    """
+    js_runtime = os.environ.get("YTDLP_JS_RUNTIME", "node")
+    player_client = os.environ.get("YTDLP_PLAYER_CLIENT", "android")
+    return [
+        "--js-runtimes",
+        js_runtime,
+        "--extractor-args",
+        f"youtube:player_client={player_client}",
+    ]
 
 
 def _log_ytdlp_stderr(stderr: str) -> None:
@@ -34,24 +54,30 @@ def download_audio(url: str, output_dir: Path) -> Path:
     vid = get_video_id(url)
     output_template = str(output_dir / "%(id)s.%(ext)s")
 
-    result = subprocess.run(
-        [
-            "yt-dlp",
-            "--sleep-interval",
-            "1",
-            "-x",
-            "--audio-format",
-            "mp3",
-            "--audio-quality",
-            "0",
-            "-o",
-            output_template,
-            url,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--sleep-interval",
+                "1",
+                *_ytdlp_extra_args(),
+                "-x",
+                "--audio-format",
+                "mp3",
+                "--audio-quality",
+                "0",
+                "-o",
+                output_template,
+                url,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        # Die echte yt-dlp-Fehlermeldung landet sonst nirgends – logge sie.
+        _log_ytdlp_stderr(e.stderr)
+        raise
     _log_ytdlp_stderr(result.stderr)
     time.sleep(RATE_LIMIT_DELAY)
 
