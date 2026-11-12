@@ -23,6 +23,20 @@ class TestReadSources:
         assert sources[0].category == "tech"
         assert sources[1].category == "musik"
 
+    def test_with_subcategories(self, tmp_path):
+        f = tmp_path / "sources.txt"
+        f.write_text(
+            "https://youtube.com/watch?v=abc, energie, solar\n"
+            "https://youtu.be/def\n"
+            "https://youtu.be/ghi, musik, klavier\n"
+        )
+        sources = _read_sources(f)
+        assert sources[0].category == "energie"
+        assert sources[0].subcategory == "solar"
+        assert sources[1].category is None
+        assert sources[1].subcategory is None
+        assert sources[2].subcategory == "klavier"
+
     def test_skips_empty_and_comments(self, tmp_path):
         f = tmp_path / "sources.txt"
         f.write_text("\n# This is a comment\nhttps://youtube.com/watch?v=abc\n  \n")
@@ -61,6 +75,28 @@ class TestCliProcess:
         assert result.exit_code == 0
         assert "Journal aktualisiert: 3 Einträge" in result.stderr
 
+    def test_test_flag_success(self, mocker):
+        mocker.patch("video2wiki.summarizer.test_model_availability", return_value=("gpt-model", "OK"))
+        result = runner.invoke(app, ["process", "--test"])
+        assert result.exit_code == 0
+        assert "Verbindungstest erfolgreich" in result.stderr
+        assert "gpt-model" in result.stderr
+
+    def test_test_flag_failure(self, mocker):
+        mocker.patch(
+            "video2wiki.summarizer.test_model_availability",
+            side_effect=RuntimeError("Model not found"),
+        )
+        result = runner.invoke(app, ["process", "--test"])
+        assert result.exit_code == 1
+        assert "fehlgeschlagen" in result.stderr
+
+    def test_test_flag_works_without_url(self, mocker):
+        # --test soll auch ohne URL funktionieren
+        mocker.patch("video2wiki.summarizer.test_model_availability", return_value=("m", "OK"))
+        result = runner.invoke(app, ["process", "--test"])
+        assert result.exit_code == 0
+
     def test_unknown_command(self):
         result = runner.invoke(app, ["nonsense"])
         assert result.exit_code != 0
@@ -89,3 +125,10 @@ class TestMainDefaultCommand:
         main()
         mock_app.assert_called_once()
         assert sys.argv[1:] == ["--help"]
+
+    def test_injects_process_for_test_flag(self, mocker):
+        mocker.patch.object(sys, "argv", ["video2wiki", "--test"])
+        mock_app = mocker.patch("video2wiki.cli.app", return_value=None)
+        main()
+        mock_app.assert_called_once()
+        assert sys.argv[1:] == ["process", "--test"]

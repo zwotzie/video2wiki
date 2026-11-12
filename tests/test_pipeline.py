@@ -1,21 +1,32 @@
+import pytest
+
 from video2wiki.models import VideoSource
 from video2wiki.pipeline import (
     ST_DONE,
     ST_ERROR_AUDIO,
+    ST_ERROR_LLM,
     ST_ERROR_METADATA,
     ST_ERROR_SUMMARY,
     ST_SKIPPED_EXISTING,
     ST_SKIPPED_JOURNAL,
     PipelineOptions,
     existing_categories,
+    existing_subcategories,
     process_video,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_check(mocker):
+    """Verhindert echte LLM-Erreichbarkeits-Checks in den Pipeline-Tests."""
+    return mocker.patch("video2wiki.pipeline.ensure_model_available")
 
 
 def _options(tmp_path, **overrides):
     data = dict(
         output=tmp_path,
         category=None,
+        subcategory=None,
         force=False,
         api_base=None,
         model=None,
@@ -84,6 +95,16 @@ class TestProcessVideo:
         result = process_video(VideoSource(url="https://youtube.com/watch?v=abc"), _options(tmp_path))
         assert result.status == ST_ERROR_SUMMARY
 
+    def test_llm_unavailable_fails_fast(self, mocker, tmp_path, _no_llm_check):
+        mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
+        _no_llm_check.side_effect = RuntimeError("Connection refused")
+        mock_meta = mocker.patch("video2wiki.pipeline.get_video_metadata")
+
+        result = process_video(VideoSource(url="https://youtube.com/watch?v=abc"), _options(tmp_path))
+        assert result.status == ST_ERROR_LLM
+        # Fail-Fast: Metadaten werden nie abgerufen
+        mock_meta.assert_not_called()
+
     def test_full_success_with_subtitles(self, mocker, tmp_path):
         mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
         mocker.patch("video2wiki.pipeline.get_video_metadata", return_value=_meta())
@@ -131,6 +152,56 @@ class TestProcessVideo:
         entry = mock_add.call_args[0][1]
         assert entry.category == "musik"
         assert mock_write.call_args[0][0].category == "musik"
+
+    def test_subcategory_from_options(self, mocker, tmp_path):
+        mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
+        mocker.patch("video2wiki.pipeline.get_video_metadata", return_value=_meta())
+        mocker.patch("video2wiki.pipeline.get_subtitles", return_value="T")
+        mocker.patch("video2wiki.pipeline.get_video_id", return_value="abc")
+        mocker.patch("video2wiki.pipeline.summarize_with_chunking", return_value=_summary(kernpunkte=[]))
+        fake_path = tmp_path / "musik" / "klavier" / "test-kanal.md"
+        mock_write = mocker.patch("video2wiki.pipeline.write_wiki_entry", return_value=fake_path)
+        mock_add = mocker.patch("video2wiki.pipeline.add_journal_entry")
+
+        process_video(
+            VideoSource(url="https://youtube.com/watch?v=abc"),
+            _options(tmp_path, category="musik", subcategory="klavier"),
+        )
+        entry = mock_add.call_args[0][1]
+        assert entry.category == "musik"
+        assert entry.subcategory == "klavier"
+        assert mock_write.call_args[0][0].subcategory == "klavier"
+
+    def test_subcategory_from_source(self, mocker, tmp_path):
+        mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
+        mocker.patch("video2wiki.pipeline.get_video_metadata", return_value=_meta())
+        mocker.patch("video2wiki.pipeline.get_subtitles", return_value="T")
+        mocker.patch("video2wiki.pipeline.get_video_id", return_value="abc")
+        mocker.patch("video2wiki.pipeline.summarize_with_chunking", return_value=_summary(kernpunkte=[]))
+        fake_path = tmp_path / "energie" / "solar" / "test-kanal.md"
+        mocker.patch("video2wiki.pipeline.write_wiki_entry", return_value=fake_path)
+        mock_add = mocker.patch("video2wiki.pipeline.add_journal_entry")
+
+        process_video(
+            VideoSource(url="https://youtube.com/watch?v=abc", category="energie", subcategory="solar"),
+            _options(tmp_path, category="energie"),
+        )
+        entry = mock_add.call_args[0][1]
+        assert entry.subcategory == "solar"
+
+    def test_no_subcategory_when_not_provided(self, mocker, tmp_path):
+        mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
+        mocker.patch("video2wiki.pipeline.get_video_metadata", return_value=_meta())
+        mocker.patch("video2wiki.pipeline.get_subtitles", return_value="T")
+        mocker.patch("video2wiki.pipeline.get_video_id", return_value="abc")
+        mocker.patch("video2wiki.pipeline.summarize_with_chunking", return_value=_summary(kernpunkte=[]))
+        fake_path = tmp_path / "cat" / "test-kanal.md"
+        mocker.patch("video2wiki.pipeline.write_wiki_entry", return_value=fake_path)
+        mock_add = mocker.patch("video2wiki.pipeline.add_journal_entry")
+
+        process_video(VideoSource(url="https://youtube.com/watch?v=abc"), _options(tmp_path))
+        entry = mock_add.call_args[0][1]
+        assert entry.subcategory == ""
 
     def test_guess_category_from_title(self, mocker, tmp_path):
         mocker.patch("video2wiki.pipeline.is_in_journal", return_value=False)
@@ -259,3 +330,15 @@ class TestExistingCategories:
         (tmp_path / ".hidden").mkdir()
         (tmp_path / "file.txt").write_text("x")
         assert existing_categories(tmp_path) == ["energie", "musik"]
+
+
+class TestExistingSubcategories:
+    def test_empty(self, tmp_path):
+        assert existing_subcategories(tmp_path) == []
+
+    def test_lists_nested_directories(self, tmp_path):
+        (tmp_path / "energie" / "solar").mkdir(parents=True)
+        (tmp_path / "energie" / "wärmepumpe").mkdir(parents=True)
+        (tmp_path / "musik" / "klavier").mkdir(parents=True)
+        (tmp_path / "musik" / ".hidden").mkdir(parents=True)
+        assert existing_subcategories(tmp_path) == ["klavier", "solar", "wärmepumpe"]

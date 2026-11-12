@@ -9,10 +9,16 @@ class TestVideoSource:
         v = VideoSource(url="https://youtube.com/watch?v=abc123defgh")
         assert v.url == "https://youtube.com/watch?v=abc123defgh"
         assert v.category is None
+        assert v.subcategory is None
 
     def test_with_category(self):
         v = VideoSource(url="https://youtu.be/abc123defgh", category="tech")
         assert v.category == "tech"
+
+    def test_with_subcategory(self):
+        v = VideoSource(url="https://youtu.be/abc123defgh", category="tech", subcategory="python")
+        assert v.category == "tech"
+        assert v.subcategory == "python"
 
     def test_empty_url_allowed_by_pydantic(self):
         """Pydantic allows empty strings for str fields without constraints."""
@@ -62,6 +68,14 @@ class TestProcessedVideo:
         assert p.transcription_source == "subtitles"
         assert len(p.kernpunkte) == 1
         assert p.kernpunkte[0].überschrift == "Punkt 1"
+
+    def test_subcategory_default_empty(self):
+        p = self.make_full()
+        assert p.subcategory == ""
+
+    def test_with_subcategory(self):
+        p = self.make_full(subcategory="python")
+        assert p.subcategory == "python"
 
     def test_empty_tags(self):
         p = self.make_full(tags=[])

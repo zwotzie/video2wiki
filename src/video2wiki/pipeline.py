@@ -13,7 +13,7 @@ from pathlib import Path
 from .downloader import download_audio, get_subtitles, get_video_id, get_video_metadata
 from .logger import get_logger
 from .models import ProcessedVideo, VideoSource
-from .summarizer import summarize_with_chunking
+from .summarizer import ensure_model_available, summarize_with_chunking
 from .transcriber import transcribe
 from .writer import add_journal_entry, is_in_journal, target_path, write_wiki_entry
 
@@ -27,6 +27,7 @@ ST_ERROR_METADATA = "metadata_failed"
 ST_ERROR_AUDIO = "audio_download_failed"
 ST_ERROR_TRANSCRIPTION = "transcription_failed"
 ST_ERROR_SUMMARY = "summary_failed"
+ST_ERROR_LLM = "llm_unavailable"
 
 LogCallback = Callable[[str, str], None]  # (message, level)
 
@@ -37,6 +38,7 @@ class PipelineOptions:
 
     output: Path = Path("./wiki")
     category: str | None = None
+    subcategory: str | None = None
     template: Path | None = None
     force: bool = False
     api_base: str | None = None
@@ -88,6 +90,15 @@ def process_video(
         _emit("info", "  Übersprungen (bereits im Journal).")
         return PipelineResult(status=ST_SKIPPED_JOURNAL)
 
+    # Erreichbarkeits-Check des LLM, bevor teure Arbeit (Download/Whisper) startet.
+    # Ergebnis wird pro (api_base, model) gecacht → ein API-Call pro Lauf.
+    try:
+        if ensure_model_available(options.api_base, options.model):
+            _emit("info", "  LLM-Erreichbarkeit geprüft – Modell antwortet.")
+    except Exception as e:
+        _emit("error", f"  ✗ Fehler: LLM-Modell nicht erreichbar: {e}")
+        return PipelineResult(status=ST_ERROR_LLM)
+
     try:
         meta = get_video_metadata(source.url)
     except Exception:
@@ -101,6 +112,11 @@ def process_video(
     if cat == "uncategorized" and options.category is None and resolve_category is not None:
         cat = resolve_category()
     _emit("info", f"  Kategorie: {cat}")
+
+    # Subkategorie ist immer explizit (kein Raten) und optional
+    subcat = options.subcategory or source.subcategory or ""
+    if subcat:
+        _emit("info", f"  Subkategorie: {subcat}")
 
     # Prüfe verfügbare Untertitel-Sprachen
     available_subs = meta.get("available_subs") or []
@@ -144,8 +160,8 @@ def process_video(
         summary_data = summarize_with_chunking(
             transcription, meta["title"], api_base=options.api_base, model=options.model
         )
-    except Exception:
-        _emit("error", "  ✗ Fehler: Zusammenfassung fehlgeschlagen.")
+    except Exception as e:
+        _emit("error", f"  ✗ Fehler: Zusammenfassung fehlgeschlagen: {e}")
         return PipelineResult(status=ST_ERROR_SUMMARY)
 
     entry = ProcessedVideo(
@@ -157,6 +173,7 @@ def process_video(
         language=meta["language"],
         tags=summary_data.get("stichwörter", []),
         category=cat,
+        subcategory=subcat,
         transcription_source=transcription_source,
         transcription=transcription,
         zusammenfassung=summary_data["zusammenfassung"],
@@ -335,3 +352,16 @@ def existing_categories(output_base: Path) -> list[str]:
     if not output_base.exists():
         return []
     return sorted(d.name for d in output_base.iterdir() if d.is_dir() and not d.name.startswith("."))
+
+
+def existing_subcategories(output_base: Path) -> list[str]:
+    """Liefert alle vorhandenen Subkategorien (2. Hierarchie-Ebene) im Ausgabeverzeichnis."""
+    names: set[str] = set()
+    for cat in existing_categories(output_base):
+        base = output_base / cat
+        if not base.is_dir():
+            continue
+        for d in base.iterdir():
+            if d.is_dir() and not d.name.startswith("."):
+                names.add(d.name)
+    return sorted(names)

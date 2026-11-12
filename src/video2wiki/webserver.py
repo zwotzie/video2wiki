@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -29,6 +29,7 @@ from .models import VideoSource
 from .pipeline import (
     ST_DONE,
     ST_ERROR_AUDIO,
+    ST_ERROR_LLM,
     ST_ERROR_METADATA,
     ST_ERROR_SUMMARY,
     ST_ERROR_TRANSCRIPTION,
@@ -36,6 +37,7 @@ from .pipeline import (
     ST_SKIPPED_JOURNAL,
     PipelineOptions,
     existing_categories,
+    existing_subcategories,
     process_video,
 )
 from .writer import backfill_journal, load_journal
@@ -67,10 +69,13 @@ class ProcessRequest(BaseModel):
 
     url: str = Field(..., min_length=1, description="YouTube-URL")
     category: str | None = Field(None, description="Optionale Wiki-Kategorie")
+    subcategory: str | None = Field(None, description="Optionale Wiki-Subkategorie (unter der Kategorie)")
     whisper_model: str = Field("small", description="Whisper-Modellgröße")
 
     model_config = {
-        "json_schema_extra": {"examples": [{"url": "https://youtube.com/watch?v=abc", "category": "energie"}]}
+        "json_schema_extra": {
+            "examples": [{"url": "https://youtube.com/watch?v=abc", "category": "energie", "subcategory": "solar"}]
+        }
     }
 
 
@@ -115,12 +120,13 @@ class JobManager:
             finally:
                 self._queue.task_done()
 
-    def submit(self, url: str, category: str | None, whisper_model: str) -> str:
+    def submit(self, url: str, category: str | None, subcategory: str | None, whisper_model: str) -> str:
         job_id = uuid.uuid4().hex[:12]
         job = {
             "id": job_id,
             "url": url,
             "category": category,
+            "subcategory": subcategory,
             "whisper_model": whisper_model,
             "status": "queued",
             "logs": [],
@@ -153,6 +159,7 @@ class JobManager:
             options = PipelineOptions(
                 output=self._config.output,
                 category=job["category"],
+                subcategory=job["subcategory"],
                 template=self._config.template,
                 api_base=self._config.api_base,
                 model=self._config.model,
@@ -160,7 +167,7 @@ class JobManager:
                 work_dir=self._config.work_dir,
             )
             result = process_video(
-                VideoSource(url=job["url"], category=job["category"]),
+                VideoSource(url=job["url"], category=job["category"], subcategory=job["subcategory"]),
                 options,
                 emit_log=emit,
             )
@@ -202,6 +209,7 @@ class JobManager:
             "id": job["id"],
             "url": job["url"],
             "category": job["category"],
+            "subcategory": job["subcategory"],
             "status": job["status"],
             "logs": job["logs"],
             "created_at": job["created_at"],
@@ -218,6 +226,7 @@ def _status_message(status: str) -> str:
         ST_ERROR_AUDIO: "Audio-Download fehlgeschlagen.",
         ST_ERROR_TRANSCRIPTION: "Transkription ist leer.",
         ST_ERROR_SUMMARY: "Zusammenfassung fehlgeschlagen.",
+        ST_ERROR_LLM: "LLM-Modell nicht erreichbar.",
     }
     return messages.get(status, f"Verarbeitung fehlgeschlagen (Status: {status}).")
 
@@ -252,6 +261,14 @@ def create_app(
     if _STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon_ico():
+        """Beantwortet den automatischen /favicon.ico-Request ohne 404."""
+        ico = _STATIC_DIR / "favicon.ico"
+        if ico.exists():
+            return FileResponse(ico, media_type="image/x-icon")
+        raise HTTPException(status_code=404, detail="Favicon nicht gefunden.")
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         return _TEMPLATES.TemplateResponse(
@@ -259,6 +276,7 @@ def create_app(
             "index.html",
             {
                 "categories": existing_categories(config.output),
+                "subcategories": existing_subcategories(config.output),
                 "whisper_models": _WHISPER_MODELS,
                 "default_whisper_model": config.whisper_model,
             },
@@ -269,7 +287,7 @@ def create_app(
         """Reicht ein Video zur Verarbeitung ein; läuft asynchron im Hintergrund."""
         if not request.url.strip():
             raise HTTPException(status_code=422, detail="URL darf nicht leer sein.")
-        job_id = manager.submit(request.url.strip(), request.category, request.whisper_model)
+        job_id = manager.submit(request.url.strip(), request.category, request.subcategory, request.whisper_model)
         return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
     @app.get("/api/jobs")

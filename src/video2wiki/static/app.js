@@ -22,6 +22,7 @@
         body: JSON.stringify({
           url: $("#url").value.trim(),
           category: $("#category").value.trim() || null,
+          subcategory: $("#subcategory").value.trim() || null,
           whisper_model: $("#whisper_model").value,
         }),
       });
@@ -33,6 +34,7 @@
       statusEl.textContent = `Job ${data.job_id} gestartet – verarbeite …`;
       $("#url").value = "";
       $("#category").value = "";
+      $("#subcategory").value = "";
       refreshJobs();
     } catch (err) {
       statusEl.className = "status err";
@@ -56,7 +58,7 @@
     const logs = (job.logs || [])
       .map((l) => `<div class="line ${l.level}">${esc(l.message)}</div>`)
       .join("");
-    const cat = job.category ? `<span class="job-cat">(${esc(job.category)})</span>` : "";
+    const cat = job.category ? `<span class="job-cat">(${esc(job.category)}${job.subcategory ? " / " + esc(job.subcategory) : ""})</span>` : "";
 
     let extra = "";
     if (job.status === "done" && job.output_path) {
@@ -113,7 +115,7 @@
           return `<tr>
             <td>${link}</td>
             <td>${esc(e.channel || "")}</td>
-            <td>${esc(e.category || "")}</td>
+            <td>${esc(e.category || "")}${e.subcategory ? " / " + esc(e.subcategory) : ""}</td>
             <td>${esc(e.processed_at || "")}</td>
             <td>${e.transcription_source ? esc(e.transcription_source) : ""}</td>
           </tr>`;

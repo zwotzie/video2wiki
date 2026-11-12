@@ -6,6 +6,7 @@ erscheinungsdatum: "$publish_date"
 sprache: $language
 transkription: $transcription_source
 tags: [$tags]
+unterkategorie: $subcategory
 ---
 
 # $titel_deutsch – $channel

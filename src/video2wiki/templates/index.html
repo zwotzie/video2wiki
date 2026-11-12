@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>video2wiki – Webservice</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="alternate icon" href="/favicon.ico" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -24,6 +26,12 @@
         <input type="text" id="category" name="category" list="category-list" placeholder="energie, finanzen, gesundheit, …" />
         <datalist id="category-list">
           {% for cat in categories %}<option value="{{ cat }}"></option>{% endfor %}
+        </datalist>
+
+        <label for="subcategory">Unterkategorie <span class="hint">(optional)</span></label>
+        <input type="text" id="subcategory" name="subcategory" list="subcategory-list" placeholder="z. B. solar, bitcoins, ernährung, …" />
+        <datalist id="subcategory-list">
+          {% for sub in subcategories %}<option value="{{ sub }}"></option>{% endfor %}
         </datalist>
 
         <label for="whisper_model">Whisper-Modell</label>

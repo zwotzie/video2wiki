@@ -27,7 +27,7 @@ def main() -> None:
     die eigentliche CLI ausführt.
     """
     args = sys.argv[1:]
-    if args and args[0] not in _KNOWN_COMMANDS and not args[0].startswith("-"):
+    if args and (args[0] == "--test" or (args[0] not in _KNOWN_COMMANDS and not args[0].startswith("-"))):
         sys.argv[1:] = ["process", *args]
     app()
 
@@ -36,8 +36,14 @@ def main() -> None:
 def process(
     url: str | None = typer.Argument(None, help="YouTube-URL"),
     category: str | None = typer.Option(None, "--category", "-c", help="Wiki-Kategorie (Unterverzeichnis)"),
+    subcategory: str | None = typer.Option(
+        None, "--subcategory", "-s", help="Wiki-Subkategorie (Unterverzeichnis unter der Kategorie)"
+    ),
     file: Path | None = typer.Option(
-        None, "--file", "-f", help="Datei mit URLs (eine pro Zeile; optionale Kategorie nach Komma)"
+        None,
+        "--file",
+        "-f",
+        help="Datei mit URLs (eine pro Zeile; optional Kategorie/Subkategorie nach Komma: url,kat,unterkat)",
     ),
     output: Path = typer.Option(Path("./wiki"), "--output", "-o", help="Ausgabeverzeichnis für das Wiki"),
     template: Path | None = typer.Option(
@@ -51,6 +57,9 @@ def process(
     ),
     llm: str | None = typer.Option(None, "--llm", help="LLM-Modellname (default: $OPENAI_MODEL / gpt-4o-mini)"),
     backfill: bool = typer.Option(False, "--backfill", help="Journal aus bestehenden Wiki-Einträgen befüllen"),
+    test: bool = typer.Option(
+        False, "--test", help="Prüft, ob das konfigurierte LLM-Modell verfügbar ist, und beendet danach"
+    ),
     whisper_model: str = typer.Option(
         "small", "--model", "-m", help="Whisper-Modellgröße (tiny, base, small, medium, large-v3)"
     ),
@@ -67,10 +76,22 @@ def process(
         log.info("Journal aktualisiert: %s Einträge hinzugefügt.", count)
         raise typer.Exit(0)
 
+    # --test: prüfen, ob das konfigurierte LLM-Modell erreichbar ist
+    if test:
+        from .summarizer import test_model_availability
+
+        try:
+            resolved_model, reply = test_model_availability(api_base=api_base, model=llm)
+        except Exception as e:
+            log.error("✗ LLM-Verbindungstest fehlgeschlagen: %s", e)
+            raise typer.Exit(1)
+        log.info("✓ LLM-Verbindungstest erfolgreich: Modell '%s' antwortet mit '%s'.", resolved_model, reply)
+        raise typer.Exit(0)
+
     if file:
         sources = _read_sources(file)
     elif url:
-        sources = [VideoSource(url=url, category=category)]
+        sources = [VideoSource(url=url, category=category, subcategory=subcategory)]
     else:
         log.error("Gib eine URL oder eine --file mit Quellen an.")
         raise typer.Exit(1)
@@ -82,6 +103,7 @@ def process(
         options = PipelineOptions(
             output=output,
             category=source.category,
+            subcategory=source.subcategory,
             template=template,
             force=force,
             api_base=api_base,
@@ -147,10 +169,11 @@ def _read_sources(path: Path) -> list[VideoSource]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        parts = [p.strip() for p in line.split(",", 1)]
+        parts = [p.strip() for p in line.split(",", 2)]
         url = parts[0]
         category = parts[1] if len(parts) > 1 else None
-        sources.append(VideoSource(url=url, category=category))
+        subcategory = parts[2] if len(parts) > 2 else None
+        sources.append(VideoSource(url=url, category=category, subcategory=subcategory))
     return sources
 
 

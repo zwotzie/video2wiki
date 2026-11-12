@@ -1,12 +1,19 @@
 import json
 import os
+import threading
 
-import httpx
+import httpx2 as httpx
+import openai
 from openai import OpenAI
 
 from .logger import get_logger
 
 log = get_logger("summarizer")
+
+# Expliziter HTTP-Timeout für alle LLM-Calls. Der OpenAI-Default ist
+# read/write=600s (~10 min) – ein "stummer" Server (akzeptiert, antwortet nie)
+# würde den Check sonst extrem lange blockieren statt schnell abzubrechen.
+_CALL_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
 
 
 def _build_client(api_base: str) -> OpenAI:
@@ -14,12 +21,12 @@ def _build_client(api_base: str) -> OpenAI:
     ssl_verify = os.environ.get("OPENAI_SSL_VERIFY", "true").lower() in ("true", "1", "yes")
 
     if ssl_verify and api_base == "https://api.openai.com/v1":
-        return OpenAI(api_key=api_key)
+        return OpenAI(api_key=api_key, timeout=_CALL_TIMEOUT)
 
     return OpenAI(
         base_url=api_base,
         api_key=api_key,
-        http_client=httpx.Client(verify=ssl_verify),
+        http_client=httpx.Client(verify=ssl_verify, timeout=_CALL_TIMEOUT),
     )
 
 
@@ -29,6 +36,103 @@ def _resolve_model() -> str:
 
 def _structured_output_enabled() -> bool:
     return os.environ.get("OPENAI_STRUCTURED_OUTPUT", "true").lower() in ("true", "1", "yes")
+
+
+def test_model_availability(
+    api_base: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 16,
+) -> tuple[str, str]:
+    """Prüft, ob das konfigurierte LLM-Modell erreichbar und verfügbar ist.
+
+    Führt einen minimalen Chat-Completion-Call durch (ohne Structured Output,
+    damit der Test auf möglichst vielen kompatiblen Servern funktioniert).
+    Wirft eine Exception, falls das Modell nicht verfügbar ist.
+
+    Returns:
+        (modellname, antwort) – der aufgelöste Modellname und eine kurze
+        Beispiel-Antwort des Modells.
+    """
+    api_base = api_base or os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+    model = model or _resolve_model()
+    client = _build_client(api_base)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Du bist ein Test-Assistent. Antworte auf Deutsch."},
+            {"role": "user", "content": "Antworte nur mit dem Wort: OK"},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+
+    content = response.choices[0].message.content or ""
+    return model, content.strip()
+
+
+_CONTEXT_TOO_LONG_MARKERS = (
+    "context length",
+    "context_length",
+    "maximum context",
+    "max context",
+    "too long",
+    "token limit",
+    "maximum tokens",
+    "max tokens",
+    "reduce the length",
+    "context window",
+)
+
+
+def _is_context_too_long(exc: BaseException) -> bool:
+    """Erkennt, ob eine LLM-Exception auf einen zu langen Prompt zurückgeht.
+
+    Nur dann ist ein erneuter (kürzerer) Versuch sinnvoll. Verbindungs-, Timeout-,
+    Auth- oder Server-Fehler sind explizit KEINE Context-Fehler – hier hilft kein
+    weiteres Splitten, sondern nur ein Abbruch mit klarer Meldung.
+    """
+    if isinstance(exc, openai.BadRequestError):
+        code = getattr(exc, "code", None)
+        if isinstance(code, str):
+            text = code.lower()
+            if text == "context_length_exceeded" or any(m in text for m in _CONTEXT_TOO_LONG_MARKERS):
+                return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _CONTEXT_TOO_LONG_MARKERS)
+
+
+_availability_cache: set[tuple[str, str]] = set()
+_availability_lock = threading.Lock()
+
+
+def ensure_model_available(api_base: str | None = None, model: str | None = None) -> bool:
+    """Stellt sicher, dass das konfigurierte LLM-Modell erreichbar ist.
+
+    Macht pro (api_base, model) genau einen echten Mini-Call (``test_model_availability``)
+    und cached den Erfolg in-prozess (thread-safe, für die Webserver-Worker). Dadurch
+    kostet der Check in einem Batch nur einen einzigen API-Call. Fehler werden NICHT
+    gecacht, damit ein späterer Versuch erneut prüfen kann.
+
+    Returns:
+        True, wenn tatsächlich geprüft wurde; False bei Cache-Treffer.
+    """
+    api_base = api_base or os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+    model = model or _resolve_model()
+    key = (api_base, model)
+
+    with _availability_lock:
+        if key in _availability_cache:
+            return False
+
+    try:
+        test_model_availability(api_base=api_base, model=model)
+    except Exception as e:
+        raise RuntimeError(f"Modell '{model}' nicht erreichbar ({api_base}): {e}") from e
+
+    with _availability_lock:
+        _availability_cache.add(key)
+    return True
 
 
 def _call_llm(
@@ -210,6 +314,9 @@ def summarize_with_chunking(
         try:
             return summarize(text, title, api_base, model)
         except Exception as e:
+            if not _is_context_too_long(e):
+                log.error("  ✗ LLM-Fehler (kein Context-Problem), kein Splitten – Abbruch: %s", e)
+                raise
             if depth >= 5 or len(text) < 2000:
                 log.error(
                     "  ✗ Block auch nach %s Teilungen zu groß (%s Zeichen): %s",

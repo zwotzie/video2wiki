@@ -1,17 +1,35 @@
 import json
 import os
 
+import httpx2 as httpx
+import openai
 import pytest
 
 from video2wiki.summarizer import (
     _build_client,
     _call_llm,
+    _is_context_too_long,
     _merge_results,
     _resolve_model,
     _split_into_chunks,
+    ensure_model_available,
     summarize,
     summarize_with_chunking,
 )
+from video2wiki.summarizer import (
+    test_model_availability as _test_model_availability,
+)
+
+
+def _fake_response():
+    req = httpx.Request("GET", "http://model.local/v1/chat/completions")
+
+    class FakeHTTPResponse:
+        request = req
+        status_code = 400
+        headers = httpx.Headers({})
+
+    return FakeHTTPResponse()
 
 
 class TestBuildClient:
@@ -19,7 +37,7 @@ class TestBuildClient:
         mocker.patch.dict(os.environ, {"OPENAI_SSL_VERIFY": "true", "OPENAI_API_KEY": ""})
         mock_openai = mocker.patch("video2wiki.summarizer.OpenAI")
         _build_client("https://api.openai.com/v1")
-        mock_openai.assert_called_once_with(api_key=mocker.ANY)
+        mock_openai.assert_called_once_with(api_key=mocker.ANY, timeout=mocker.ANY)
 
     def test_custom_base_url(self, mocker):
         mocker.patch.dict(os.environ, {"OPENAI_SSL_VERIFY": "true", "OPENAI_API_KEY": ""})
@@ -36,7 +54,7 @@ class TestBuildClient:
         mocker.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-my-secret", "OPENAI_SSL_VERIFY": "true"})
         mock_openai = mocker.patch("video2wiki.summarizer.OpenAI")
         _build_client("https://api.openai.com/v1")
-        mock_openai.assert_called_once_with(api_key="sk-my-secret")
+        mock_openai.assert_called_once_with(api_key="sk-my-secret", timeout=mocker.ANY)
 
     def test_no_api_key_uses_unused(self, mocker):
         mocker.patch.dict(os.environ, {}, clear=True)
@@ -49,6 +67,15 @@ class TestBuildClient:
             http_client=mocker.ANY,
         )
 
+    def test_custom_client_uses_timeout(self, mocker):
+        mocker.patch.dict(os.environ, {"OPENAI_SSL_VERIFY": "true", "OPENAI_API_KEY": ""})
+        mocker.patch("video2wiki.summarizer.OpenAI")
+        mock_httpx_client = mocker.patch("video2wiki.summarizer.httpx.Client")
+        _build_client("https://custom.api/v1")
+        kwargs = mock_httpx_client.call_args[1]
+        assert kwargs["timeout"] is not None
+        assert kwargs["verify"] is True
+
 
 class TestResolveModel:
     def test_from_env(self, mocker):
@@ -59,6 +86,40 @@ class TestResolveModel:
         # kein OPENAI_MODEL gesetzt → Fallback
         mocker.patch.dict(os.environ, {}, clear=True)
         assert _resolve_model() == "gpt-4o-mini"
+
+
+class TestIsContextTooLong:
+    def _req(self):
+        return httpx.Request("GET", "http://model.local/v1/chat/completions")
+
+    def test_badrequest_context_length_exceeded(self):
+        exc = openai.BadRequestError("err", response=_fake_response(), body={"code": "context_length_exceeded"})
+        assert _is_context_too_long(exc)
+
+    def test_badrequest_other_code(self):
+        exc = openai.BadRequestError("err", response=_fake_response(), body={"code": "invalid_request_error"})
+        assert not _is_context_too_long(exc)
+
+    def test_runtime_error_with_too_long_message(self):
+        assert _is_context_too_long(RuntimeError("Context too long"))
+
+    def test_token_limit_message(self):
+        assert _is_context_too_long(RuntimeError("This model's maximum context length is 128000 tokens"))
+
+    def test_api_timeout_is_not_context(self):
+        assert not _is_context_too_long(openai.APITimeoutError(request=self._req()))
+
+    def test_api_connection_error_is_not_context(self):
+        assert not _is_context_too_long(openai.APIConnectionError(request=self._req()))
+
+    def test_httpx_read_timeout_is_not_context(self):
+        assert not _is_context_too_long(httpx.ReadTimeout("timed out", request=self._req()))
+
+    def test_httpx_connect_error_is_not_context(self):
+        assert not _is_context_too_long(httpx.ConnectError("conn refused", request=self._req()))
+
+    def test_generic_api_error_is_not_context(self):
+        assert not _is_context_too_long(RuntimeError("API error"))
 
 
 class TestSplitIntoChunks:
@@ -286,6 +347,102 @@ class TestSummarizeWithChunking:
 
         with pytest.raises(RuntimeError):
             summarize_with_chunking("A. " * 50000, "Titel", api_base="https://custom.api/v1", model="model-x")
+
+    def test_connection_error_does_not_split(self, mocker):
+        """Modell nicht erreichbar → NUR EIN summarize-Call, kein Splitten/Mergen."""
+        req = httpx.Request("GET", "http://model.local/v1/chat/completions")
+        mock_summarize = mocker.patch("video2wiki.summarizer.summarize")
+        mock_summarize.side_effect = openai.APIConnectionError(request=req)
+        mock_merge = mocker.patch("video2wiki.summarizer._merge_results")
+
+        with pytest.raises(openai.APIConnectionError):
+            summarize_with_chunking("A. " * 50000, "Titel", api_base="https://custom.api/v1", model="model-x")
+
+        assert mock_summarize.call_count == 1
+        mock_merge.assert_not_called()
+
+
+class TestModelAvailability:
+    def test_success(self, mocker):
+        mock_client = mocker.Mock()
+        mock_client.chat.completions.create.return_value = FakeResponse("OK")
+        mocker.patch("video2wiki.summarizer._build_client", return_value=mock_client)
+
+        model, reply = _test_model_availability(api_base="https://custom.api/v1", model="model-x")
+        assert model == "model-x"
+        assert reply == "OK"
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert call_kwargs["model"] == "model-x"
+
+    def test_uses_env_defaults(self, mocker):
+        mock_client = mocker.Mock()
+        mock_client.chat.completions.create.return_value = FakeResponse("OK")
+        mocker.patch("video2wiki.summarizer._build_client", return_value=mock_client)
+        mocker.patch.dict(
+            os.environ,
+            {"OPENAI_API_BASE": "https://custom.api/v1", "OPENAI_MODEL": "custom-model"},
+        )
+
+        model, _ = _test_model_availability()
+        assert model == "custom-model"
+
+    def test_empty_reply(self, mocker):
+        mock_client = mocker.Mock()
+        mock_client.chat.completions.create.return_value = FakeResponse(None)
+        mocker.patch("video2wiki.summarizer._build_client", return_value=mock_client)
+
+        model, reply = _test_model_availability(api_base="https://custom.api/v1", model="model-x")
+        assert model == "model-x"
+        assert reply == ""
+
+    def test_propagates_api_errors(self, mocker):
+        mock_client = mocker.Mock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("Model not found")
+        mocker.patch("video2wiki.summarizer._build_client", return_value=mock_client)
+
+        with pytest.raises(RuntimeError, match="Model not found"):
+            _test_model_availability(api_base="https://custom.api/v1", model="model-x")
+
+
+class TestEnsureModelAvailable:
+    def test_success_performs_check(self, mocker):
+        mock_test = mocker.patch("video2wiki.summarizer._availability_cache", new=set())
+        mock_test = mocker.patch("video2wiki.summarizer.test_model_availability", return_value=("m", "OK"))
+
+        assert ensure_model_available(api_base="https://custom.api/v1", model="model-x") is True
+        mock_test.assert_called_once_with(api_base="https://custom.api/v1", model="model-x")
+
+    def test_caches_success(self, mocker):
+        mocker.patch("video2wiki.summarizer._availability_cache", new=set())
+        mock_test = mocker.patch("video2wiki.summarizer.test_model_availability", return_value=("m", "OK"))
+
+        ensure_model_available(api_base="https://custom.api/v1", model="model-x")
+        ensure_model_available(api_base="https://custom.api/v1", model="model-x")
+        assert mock_test.call_count == 1
+
+    def test_failure_raises_and_is_not_cached(self, mocker):
+        mocker.patch("video2wiki.summarizer._availability_cache", new=set())
+        mock_test = mocker.patch(
+            "video2wiki.summarizer.test_model_availability",
+            side_effect=RuntimeError("Connection refused"),
+        )
+
+        with pytest.raises(RuntimeError, match="nicht erreichbar"):
+            ensure_model_available(api_base="https://custom.api/v1", model="model-x")
+        with pytest.raises(RuntimeError, match="nicht erreichbar"):
+            ensure_model_available(api_base="https://custom.api/v1", model="model-x")
+        assert mock_test.call_count == 2
+
+    def test_uses_env_defaults(self, mocker):
+        mocker.patch("video2wiki.summarizer._availability_cache", new=set())
+        mock_test = mocker.patch("video2wiki.summarizer.test_model_availability", return_value=("m", "OK"))
+        mocker.patch.dict(
+            os.environ,
+            {"OPENAI_API_BASE": "https://custom.api/v1", "OPENAI_MODEL": "custom-model"},
+        )
+
+        ensure_model_available()
+        mock_test.assert_called_once_with(api_base="https://custom.api/v1", model="custom-model")
 
 
 class TestMergeResults:

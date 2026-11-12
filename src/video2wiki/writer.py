@@ -18,6 +18,7 @@ _CANONICAL_KEYS = [
     "transcription_source",
     "tags",
     "category",
+    "subcategory",
     "processed_at",
     "output_path",
 ]
@@ -48,7 +49,10 @@ def target_path(video: ProcessedVideo, output_base: Path) -> Path:
     title = video.titel_deutsch or video.title
     safe_title = sanitize_filename(title)
     filename = f"{safe_title}-{safe_channel}.md"
-    return output_base / video.category / filename
+    base = output_base / video.category
+    if video.subcategory:
+        base = base / video.subcategory
+    return base / filename
 
 
 def _format_kernpunkte(abschnitte: list[KernpunktAbschnitt]) -> str:
@@ -91,6 +95,7 @@ def write_wiki_entry(
         language=video.language,
         transcription_source=video.transcription_source,
         tags=", ".join(video.tags),
+        subcategory=video.subcategory or "",
         zusammenfassung=video.zusammenfassung,
         kernpunkte=_format_kernpunkte(video.kernpunkte),
         fazit=video.fazit,
@@ -164,6 +169,7 @@ def add_journal_entry(output_base: Path, video: ProcessedVideo, output_path: str
             "transcription_source": video.transcription_source,
             "tags": video.tags,
             "category": video.category,
+            "subcategory": video.subcategory or "",
             "processed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "output_path": output_path,
         }
@@ -189,7 +195,13 @@ def backfill_journal(output_base: Path) -> int:
         if url in known_urls:
             continue
 
-        category = md_path.parent.name
+        # Kategorie/Subkategorie aus dem Verzeichnispfad ableiten:
+        # wiki/<kat>/<unterkat>/datei.md → beides; wiki/<kat>/datei.md → nur Kategorie
+        rel_parent = md_path.parent.relative_to(output_base)
+        parts = rel_parent.parts
+        category = parts[0] if parts else ""
+        path_subcategory = parts[1] if len(parts) > 1 else ""
+        subcategory = frontmatter.get("unterkategorie") or path_subcategory
         rel_path = str(md_path.relative_to(output_base))
         mtime = datetime.fromtimestamp(md_path.stat().st_mtime, tz=UTC)
 
@@ -203,6 +215,7 @@ def backfill_journal(output_base: Path) -> int:
                 "transcription_source": frontmatter.get("transkription", ""),
                 "tags": frontmatter.get("tags", []),
                 "category": category,
+                "subcategory": subcategory,
                 "processed_at": mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "output_path": rel_path,
             }
@@ -262,6 +275,7 @@ def _default_template() -> str:
         'sprache: "$language"\n'
         'transkription: "$transcription_source"\n'
         "tags: [$tags]\n"
+        'unterkategorie: "$subcategory"\n'
         "---\n\n"
         "# $titel_deutsch – $channel\n\n"
         "## Zusammenfassung\n\n"

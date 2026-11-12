@@ -40,6 +40,18 @@ class TestIndex:
         assert "Journal" in r.text
 
 
+class TestFavicon:
+    def test_favicon_ico(self, client):
+        r = client.get("/favicon.ico")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/")
+
+    def test_favicon_svg(self, client):
+        r = client.get("/static/favicon.svg")
+        assert r.status_code == 200
+        assert "image/svg+xml" in r.headers["content-type"]
+
+
 class TestProcess:
     def test_submits_job(self, mocker, client, tmp_path):
         fake_path = tmp_path / "out" / "cat" / "x.md"
@@ -49,7 +61,10 @@ class TestProcess:
             return_value=PipelineResult(status="done", entry=None, path=fake_path),
         )
 
-        r = client.post("/api/process", json={"url": "https://youtube.com/watch?v=abc", "category": "musik"})
+        r = client.post(
+            "/api/process",
+            json={"url": "https://youtube.com/watch?v=abc", "category": "musik", "subcategory": "klavier"},
+        )
         assert r.status_code == 202
         data = r.json()
         assert "job_id" in data
@@ -64,6 +79,7 @@ class TestProcess:
         source = mock_process.call_args[0][0]
         assert source.url == "https://youtube.com/watch?v=abc"
         assert source.category == "musik"
+        assert source.subcategory == "klavier"
 
     def test_rejects_blank_url(self, client):
         r = client.post("/api/process", json={"url": "   "})

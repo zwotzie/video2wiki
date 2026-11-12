@@ -70,6 +70,16 @@ class TestTargetPath:
         path = target_path(v, Path("/output"))
         assert "/" not in path.name
 
+    def test_with_subcategory(self):
+        v = self.make_video(category="tech", subcategory="python")
+        path = target_path(v, Path("/output"))
+        assert path == Path("/output/tech/python/mein-test-video-mein-kanal.md")
+
+    def test_without_subcategory_stays_flat(self):
+        v = self.make_video(category="tech")
+        path = target_path(v, Path("/output"))
+        assert path == Path("/output/tech/mein-test-video-mein-kanal.md")
+
 
 class TestFormatKernpunkte:
     def test_single_section(self):
@@ -182,6 +192,7 @@ class TestDefaultTemplate:
         assert "$zusammenfassung" in tmpl
         assert "$kernpunkte" in tmpl
         assert "$fazit" in tmpl
+        assert "$subcategory" in tmpl
         assert "## Zusammenfassung" in tmpl
         assert "## Kernpunkte" in tmpl
         assert "# Fazit" in tmpl
@@ -197,6 +208,7 @@ class TestDefaultTemplate:
             language="de",
             transcription_source="whisper",
             tags="a, b",
+            subcategory="python",
             zusammenfassung="Z",
             kernpunkte="K",
             fazit="F",
@@ -243,6 +255,29 @@ class TestJournal:
         entries = load_journal(tmp_path)
         assert len(entries) == 1
         assert entries[0]["url"] == "https://youtube.com/watch?v=abc"
+        assert entries[0]["subcategory"] == ""
+
+    def test_add_journal_entry_with_subcategory(self, tmp_path):
+        v = ProcessedVideo(
+            url="https://youtube.com/watch?v=abc",
+            title="Test",
+            channel="Channel",
+            publish_date="2024-01-15",
+            language="de",
+            tags=["tag"],
+            category="energie",
+            subcategory="solar",
+            transcription_source="subtitles",
+            transcription="T",
+            zusammenfassung="Z",
+            kernpunkte=[],
+            fazit="F",
+            markdown_path="",
+        )
+        add_journal_entry(tmp_path, v, "energie/solar/test-channel.md")
+        entries = load_journal(tmp_path)
+        assert entries[0]["category"] == "energie"
+        assert entries[0]["subcategory"] == "solar"
 
     def test_add_journal_entry_replaces_existing(self, tmp_path):
         url = "https://youtube.com/watch?v=abc"
@@ -311,6 +346,43 @@ class TestBackfillJournal:
         assert len(entries) == 1
         assert entries[0]["url"] == "https://youtube.com/watch?v=abc"
         assert entries[0]["category"] == "tech"
+
+    def test_backfills_nested_subcategory(self, tmp_path):
+        # wiki/tech/python/test-video-channel.md → Kategorie "tech", Subkategorie "python"
+        sub_dir = tmp_path / "tech" / "python"
+        sub_dir.mkdir(parents=True)
+        md_file = sub_dir / "test-video-channel.md"
+        md_file.write_text(
+            "---\n"
+            'quelle: "https://youtube.com/watch?v=abc"\n'
+            'titel: "Test Video"\n'
+            'kanal: "Channel"\n'
+            'erscheinungsdatum: "2024-01-15"\n'
+            'sprache: "de"\n'
+            'transkription: "subtitles"\n'
+            "tags: [tag1, tag2]\n"
+            'unterkategorie: "python"\n'
+            "---\n\n"
+            "Content"
+        )
+        count = backfill_journal(tmp_path)
+        assert count == 1
+        entries = load_journal(tmp_path)
+        assert entries[0]["category"] == "tech"
+        assert entries[0]["subcategory"] == "python"
+        assert entries[0]["output_path"] == "tech/python/test-video-channel.md"
+
+    def test_backfills_nested_without_frontmatter_subcategory(self, tmp_path):
+        # Ohne unterkategorie im Frontmatter wird sie aus dem Pfad abgeleitet
+        sub_dir = tmp_path / "energie" / "solar"
+        sub_dir.mkdir(parents=True)
+        md_file = sub_dir / "test-video-channel.md"
+        md_file.write_text('---\nquelle: "https://youtube.com/watch?v=abc"\ntitel: "T"\n---\n\nC')
+        count = backfill_journal(tmp_path)
+        assert count == 1
+        entries = load_journal(tmp_path)
+        assert entries[0]["category"] == "energie"
+        assert entries[0]["subcategory"] == "solar"
 
     def test_skips_known_urls(self, tmp_path):
         cat_dir = tmp_path / "tech"
